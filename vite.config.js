@@ -9,6 +9,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    minify: 'terser'
+    minify: 'terser',
+    target: 'esnext'
   }
 })
