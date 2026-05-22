@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manajemen Keuangan Sembako</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+    <div id="app"></div>
+
+    <script>
+        const { createApp, ref, computed, onMounted } = Vue;
+
+        // simple localStorage-backed DB shim for standalone pages
+        const storage = {
+            getData(key, defaultVal = []) { try { return JSON.parse(localStorage.getItem(key)) || defaultVal } catch { return defaultVal } },
+            setData(key, data) { localStorage.setItem(key, JSON.stringify(data)) }
+        };
+
+        const db = {
+            async getAll(store) { return storage.getData(store) },
+            async add(store, item) {
+                const arr = storage.getData(store);
+                const id = item.id || Date.now();
+                const toAdd = { ...item, id };
+                arr.push(toAdd);
+                storage.setData(store, arr);
+                return id;
+            },
+            async delete(store, id) {
+                const arr = storage.getData(store).filter(x => x.id !== id);
+                storage.setData(store, arr);
+            },
+            async get(store, id) { return storage.getData(store).find(x => x.id === id) },
+            async put(store, item) {
+                const arr = storage.getData(store);
+                const idx = arr.findIndex(x => x.id === item.id);
+                if (idx >= 0) arr[idx] = item; else arr.push(item);
+                storage.setData(store, arr);
+            },
+            async count(store) { return storage.getData(store).length }
+        };
+
+        async function initDB() {
+            if (storage.getData('categories').length === 0) {
+                storage.setData('categories', [
+                    { id: 1, name: 'Beras', type: 'expense' },
+                    { id: 2, name: 'Minyak', type: 'expense' },
+                    { id: 3, name: 'Gula', type: 'expense' },
+                    { id: 4, name: 'Telur', type: 'expense' },
+                    { id: 5, name: 'Bumbu', type: 'expense' },
+                    { id: 6, name: 'Penjualan', type: 'income' },
+                    { id: 7, name: 'Hutang Terbayar', type: 'income' },
+                    { id: 8, name: 'Lainnya', type: 'expense' }
+                ]);
+            }
+        }
+
+        const formatCurrency = (n) => new Intl.NumberFormat('id-ID').format(n || 0);
+        const formatDate = (d) => new Date(d).toLocaleDateString('id-ID', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+
+        const Dashboard = {
+            template: `
+                <div class="space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-gradient-to-br from-cyan-500 to-blue-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm opacity-80">Saldo Akhir</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(balance) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-green-500 to-emerald-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm opacity-80">Total Pemasukan</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(income) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-orange-500 to-red-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm opacity-80">Total Pengeluaran</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(expense) }}</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📊 Ringkasan Hutang</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div class="bg-blue-50 p-4 rounded-lg">
+                                <p class="text-gray-600 text-sm">Total Hutang Aktif</p>
+                                <p class="text-2xl font-bold text-blue-600">Rp {{ formatCurrency(totalDebt) }}</p>
+                            </div>
+                            <div class="bg-green-50 p-4 rounded-lg">
+                                <p class="text-gray-600 text-sm">Hutang Terbayar</p>
+                                <p class="text-2xl font-bold text-green-600">Rp {{ formatCurrency(paidDebt) }}</p>
+                            </div>
+                            <div class="bg-red-50 p-4 rounded-lg">
+                                <p class="text-gray-600 text-sm">Hutang Jatuh Tempo</p>
+                                <p class="text-2xl font-bold text-red-600">{{ overdueCount }}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📋 Transaksi Terbaru</h2>
+                        <div v-if="recentTransactions.length === 0" class="text-center text-gray-400 py-8">Belum ada transaksi</div>
+                        <div v-else class="space-y-2">
+                            <div v-for="t in recentTransactions" :key="t.id" class="flex justify-between p-3 bg-gray-50 rounded hover:bg-gray-100">
+                                <div>
+                                    <p class="font-semibold">{{ t.description }}</p>
+                                    <p class="text-xs text-gray-500">{{ formatDate(t.date) }}</p>
+                                </div>
+                                <span :class="['font-bold', t.type === 'income' ? 'text-green-600' : 'text-red-600']">{{ t.type === 'income' ? '+' : '-' }} Rp {{ formatCurrency(t.amount) }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['transactions', 'debts'],
+            setup(props) {
+                const income = computed(() => props.transactions.filter(t => t.type === 'income').reduce((s, t) => s + (t.amount || 0), 0));
+                const expense = computed(() => props.transactions.filter(t => t.type === 'expense').reduce((s, t) => s + (t.amount || 0), 0));
+                const balance = computed(() => income.value - expense.value);
+                const totalDebt = computed(() => props.debts.filter(d => d.status !== 'paid').reduce((s, d) => s + (d.amount || 0), 0));
+                const paidDebt = computed(() => props.debts.filter(d => d.status === 'paid').reduce((s, d) => s + (d.amount || 0), 0));
+                const overdueCount = computed(() => props.debts.filter(d => d.status !== 'paid' && d.dueDate < new Date().toISOString().split('T')[0]).length);
+                const recentTransactions = computed(() => [...props.transactions].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5));
+                return { income, expense, balance, totalDebt, paidDebt, overdueCount, recentTransactions, formatCurrency, formatDate };
+            }
+        };
+
+        const TransactionForm = {
+            template: `
+                <div class="space-y-6">
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">💳 Tambah Transaksi Baru</h2>
+                        <form @submit.prevent="submit" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Jenis Transaksi</label>
+                                <div class="flex gap-4">
+                                    <label><input v-model="form.type" type="radio" value="income"> ➕ Pemasukan</label>
+                                    <label><input v-model="form.type" type="radio" value="expense"> ➖ Pengeluaran</label>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Kategori</label>
+                                <select v-model.number="form.categoryId" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                                    <option value="">Pilih Kategori</option>
+                                    <option v-for="c in filteredCategories" :key="c.id" :value="c.id">{{ c.name }}</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Jumlah (Rp)</label>
+                                <input v-model.number="form.amount" type="number" placeholder="Masukkan jumlah" class="w-full px-3 py-2 border border-gray-300 rounded-lg" required>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Keterangan</label>
+                                <textarea v-model="form.description" placeholder="Masukkan keterangan" class="w-full px-3 py-2 border border-gray-300 rounded-lg" rows="2"></textarea>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Tanggal</label>
+                                <input v-model="form.date" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg" required>
+                            </div>
+                            <button type="submit" class="w-full bg-cyan-500 text-white px-4 py-2 rounded-lg hover:bg-cyan-600">Simpan Transaksi</button>
+                        </form>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📝 Daftar Transaksi</h2>
+                        <div v-if="transactions.length === 0" class="text-center text-gray-400 py-8">Belum ada transaksi</div>
+                        <div v-else class="space-y-2">
+                            <div v-for="t in transactions" :key="t.id" class="flex justify-between p-3 bg-gray-50 rounded border-l-4" :class="t.type === 'income' ? 'border-green-500' : 'border-red-500'">
+                                <div>
+                                    <p class="font-semibold">{{ t.description }}</p>
+                                    <p class="text-xs text-gray-500">{{ formatDate(t.date) }}</p>
+                                </div>
+                                <div class="flex gap-2">
+                                    <span :class="['font-bold', t.type === 'income' ? 'text-green-600' : 'text-red-600']">{{ t.type === 'income' ? '+' : '-' }} Rp {{ formatCurrency(t.amount) }}</span>
+                                    <button @click="deleteT(t.id)" class="text-red-600 hover:text-red-700">❌</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['categories', 'transactions'],
+            emits: ['add', 'delete'],
+            setup(props, { emit }) {
+                const form = ref({ type: 'expense', categoryId: '', amount: '', description: '', date: new Date().toISOString().split('T')[0] });
+                const filteredCategories = computed(() => props.categories.filter(c => c.type === form.value.type));
+                const submit = async () => {
+                    if (!form.value.categoryId || !form.value.amount) {
+                        alert('Lengkapi semua data!');
+                        return;
+                    }
+                    emit('add', form.value);
+                    form.value = { type: 'expense', categoryId: '', amount: '', description: '', date: new Date().toISOString().split('T')[0] };
+                };
+                const deleteT = (id) => emit('delete', id);
+                return { form, filteredCategories, submit, deleteT, formatCurrency, formatDate };
+            }
+        };
+
+        const DebtManagement = {
+            template: `
+                <div class="space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="bg-white rounded-lg shadow p-6">
+                            <h2 class="text-lg font-bold mb-4">👥 Tambah Pelanggan</h2>
+                            <form @submit.prevent="addCust" class="space-y-4">
+                                <input v-model="custForm.name" type="text" placeholder="Nama Pelanggan" class="w-full px-3 py-2 border border-gray-300 rounded-lg" required>
+                                <input v-model="custForm.phone" type="tel" placeholder="Nomor HP" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                                <textarea v-model="custForm.address" placeholder="Alamat" class="w-full px-3 py-2 border border-gray-300 rounded-lg" rows="2"></textarea>
+                                <button type="submit" class="w-full bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600">Tambah Pelanggan</button>
+                            </form>
+                        </div>
+
+                        <div class="bg-white rounded-lg shadow p-6">
+                            <h2 class="text-lg font-bold mb-4">📝 Catat Hutang</h2>
+                            <form @submit.prevent="addD" class="space-y-4">
+                                <select v-model.number="debtForm.customerId" class="w-full px-3 py-2 border border-gray-300 rounded-lg" required>
+                                    <option value="">Pilih Pelanggan</option>
+                                    <option v-for="c in customers" :key="c.id" :value="c.id">{{ c.name }}</option>
+                                </select>
+                                <input v-model.number="debtForm.amount" type="number" placeholder="Jumlah Hutang (Rp)" class="w-full px-3 py-2 border border-gray-300 rounded-lg" required>
+                                <input v-model="debtForm.dueDate" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg" required>
+                                <button type="submit" class="w-full bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600">Catat Hutang</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">👫 Daftar Pelanggan</h2>
+                        <div v-if="customers.length === 0" class="text-center text-gray-400 py-8">Belum ada pelanggan</div>
+                        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div v-for="c in customers" :key="c.id" class="p-4 bg-gray-50 rounded border-l-4 border-cyan-500">
+                                <p class="font-bold text-lg">{{ c.name }}</p>
+                                <p class="text-sm text-gray-600">{{ c.phone }}</p>
+                                <p class="text-xs text-gray-500">{{ c.address }}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">💳 Daftar Hutang</h2>
+                        <div class="flex gap-2 mb-4">
+                            <button v-for="tab in tabs" :key="tab" @click="status = tab" :class="['px-4 py-2 rounded font-semibold', status === tab ? 'bg-cyan-500 text-white' : 'bg-gray-200']">{{ tab === 'pending' ? '⏳ Aktif' : tab === 'paid' ? '✓ Lunas' : '⚠️ Jatuh Tempo' }} ({{ getCount(tab) }})</button>
+                        </div>
+                        <div v-if="filteredDebts.length === 0" class="text-center text-gray-400 py-8">Belum ada hutang</div>
+                        <div v-else class="space-y-3">
+                            <div v-for="d in filteredDebts" :key="d.id" class="p-4 bg-gray-50 rounded">
+                                <div class="flex justify-between mb-2">
+                                    <div>
+                                        <p class="font-bold">{{ getName(d.customerId) }}</p>
+                                        <p class="text-sm text-gray-600">Jatuh tempo: {{ formatDate(d.dueDate) }}</p>
+                                    </div>
+                                    <div class="text-right">
+                                        <p class="font-bold">Rp {{ formatCurrency(d.amount) }}</p>
+                                        <span :class="['text-xs px-2 py-1 rounded', d.status === 'paid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800']">{{ d.status }}</span>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2">
+                                    <button v-if="d.status !== 'paid'" @click="markPaid(d.id)" class="flex-1 bg-green-500 text-white text-sm px-3 py-2 rounded hover:bg-green-600">✓ Lunas</button>
+                                    <button @click="delD(d.id)" class="flex-1 bg-red-500 text-white text-sm px-3 py-2 rounded hover:bg-red-600">❌ Hapus</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['customers', 'debts'],
+            emits: ['add-customer', 'add-debt', 'update-debt', 'delete-debt'],
+            setup(props, { emit }) {
+                const custForm = ref({ name: '', phone: '', address: '' });
+                const debtForm = ref({ customerId: '', amount: '', dueDate: '' });
+                const status = ref('pending');
+                const tabs = ['pending', 'paid', 'overdue'];
+                
+                const filteredDebts = computed(() => props.debts.filter(d => {
+                    if (status.value === 'overdue') return d.status !== 'paid' && d.dueDate < new Date().toISOString().split('T')[0];
+                    return d.status === status.value;
+                }));
+
+                const addCust = () => {
+                    if (!custForm.value.name) { alert('Nama harus diisi!'); return; }
+                    emit('add-customer', custForm.value);
+                    custForm.value = { name: '', phone: '', address: '' };
+                };
+
+                const addD = () => {
+                    if (!debtForm.value.customerId || !debtForm.value.amount) { alert('Lengkapi data!'); return; }
+                    emit('add-debt', debtForm.value);
+                    debtForm.value = { customerId: '', amount: '', dueDate: '' };
+                };
+
+                const getCount = (s) => s === 'overdue' ? props.debts.filter(d => d.status !== 'paid' && d.dueDate < new Date().toISOString().split('T')[0]).length : props.debts.filter(d => d.status === s).length;
+                const getName = (id) => props.customers.find(c => c.id === id)?.name || 'Unknown';
+                const markPaid = (id) => emit('update-debt', id, 'paid');
+                const delD = (id) => emit('delete-debt', id);
+
+                return { custForm, debtForm, status, tabs, filteredDebts, addCust, addD, getCount, getName, markPaid, delD, formatCurrency, formatDate };
+            }
+        };
+
+        const Reports = {
+            template: `
+                <div class="space-y-6">
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📅 Filter Laporan</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Dari Tanggal</label>
+                                <input v-model="from" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Sampai Tanggal</label>
+                                <input v-model="to" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Tipe</label>
+                                <select v-model="type" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                                    <option value="">Semua</option>
+                                    <option value="income">Pemasukan</option>
+                                    <option value="expense">Pengeluaran</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-gradient-to-br from-green-500 to-emerald-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm">Total Pemasukan</p>
+                            <p class="text-3xl font-bold">Rp {{ formatCurrency(summary.income) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-orange-500 to-red-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm">Total Pengeluaran</p>
+                            <p class="text-3xl font-bold">Rp {{ formatCurrency(summary.expense) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-cyan-500 to-blue-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm">Laba/Rugi</p>
+                            <p class="text-3xl font-bold">Rp {{ formatCurrency(summary.profit) }}</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">💾 Ekspor Data</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <button @click="exportCSV" class="bg-cyan-500 text-white px-4 py-2 rounded-lg hover:bg-cyan-600">📥 CSV</button>
+                            <button @click="exportJSON" class="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600">📥 JSON</button>
+                            <button @click="printReport" class="bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600">🖨️ Cetak</button>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['transactions', 'categories'],
+            setup(props) {
+                const from = ref('');
+                const to = ref('');
+                const type = ref('');
+
+                onMounted(() => {
+                    const today = new Date();
+                    const first = new Date(today.getFullYear(), today.getMonth(), 1);
+                    from.value = first.toISOString().split('T')[0];
+                    to.value = today.toISOString().split('T')[0];
+                });
+
+                const filtered = computed(() => props.transactions.filter(t => {
+                    if (t.date < from.value || t.date > to.value) return false;
+                    if (type.value && t.type !== type.value) return false;
+                    return true;
+                }));
+
+                const summary = computed(() => {
+                    const income = filtered.value.filter(t => t.type === 'income').reduce((s, t) => s + (t.amount || 0), 0);
+                    const expense = filtered.value.filter(t => t.type === 'expense').reduce((s, t) => s + (t.amount || 0), 0);
+                    return { income, expense, profit: income - expense };
+                });
+
+                const exportCSV = () => {
+                    let csv = 'Tanggal,Tipe,Jumlah\n';
+                    filtered.value.forEach(t => csv += `${t.date},${t.type},${t.amount}\n`);
+                    download(csv, 'laporan.csv', 'text/csv');
+                };
+
+                const exportJSON = () => {
+                    const data = { periode: `${from.value} - ${to.value}`, summary: summary.value, transactions: filtered.value };
+                    download(JSON.stringify(data, null, 2), 'laporan.json', 'application/json');
+                };
+
+                const download = (content, filename, type) => {
+                    const a = document.createElement('a');
+                    a.href = `data:${type};charset=utf-8,${encodeURIComponent(content)}`;
+                    a.download = filename;
+                    a.click();
+                };
+
+                const printReport = () => window.print();
+
+                return { from, to, type, summary, exportCSV, exportJSON, printReport, formatCurrency };
+            }
+        };
+
+        const App = {
+            template: `
+                <div class="min-h-screen bg-gray-50">
+                    <header class="bg-gradient-to-r from-cyan-500 to-green-500 text-white shadow-lg sticky top-0 z-40">
+                        <div class="max-w-6xl mx-auto px-4 py-4">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-2xl">💰</span>
+                                    <h1 class="text-xl font-bold">Manajemen Keuangan</h1>
+                                </div>
+                                <nav class="flex gap-2 flex-wrap justify-end">
+                                    <button v-for="n in navs" :key="n.id" @click="page = n.id" :class="['px-3 py-2 rounded text-sm font-semibold transition', page === n.id ? 'bg-white text-cyan-600' : 'hover:bg-white hover:bg-opacity-20']">
+                                        {{ n.label }}
+                                    </button>
+                                </nav>
+                            </div>
+                        </div>
+                    </header>
+
+                    <main class="max-w-6xl mx-auto px-4 py-6">
+                        <dashboard v-if="page === 'dashboard'" :transactions="transactions" :debts="debts"></dashboard>
+                        <transaction-form v-else-if="page === 'transaction'" :categories="categories" :transactions="transactions" @add="addT" @delete="delT"></transaction-form>
+                        <debt-management v-else-if="page === 'debt'" :customers="customers" :debts="debts" @add-customer="addC" @add-debt="addD" @update-debt="upD" @delete-debt="delD"></debt-management>
+                        <reports v-else-if="page === 'reports'" :transactions="transactions" :categories="categories"></reports>
+                    </main>
+
+                    <footer class="bg-gray-100 text-gray-600 text-center py-4 mt-12 text-sm">
+                        <p>© 2024 Manajemen Keuangan Sembako v1.0</p>
+                    </footer>
+                </div>
+            `,
+            components: { dashboard: Dashboard, 'transaction-form': TransactionForm, 'debt-management': DebtManagement, reports: Reports },
+            setup() {
+                const page = ref('dashboard');
+                const transactions = ref([]);
+                const debts = ref([]);
+                const customers = ref([]);
+                const categories = ref([]);
+
+                const navs = [
+                    { id: 'dashboard', label: '📊 Dashboard' },
+                    { id: 'transaction', label: '💳 Transaksi' },
+                    { id: 'debt', label: '📝 Hutang' },
+                    { id: 'reports', label: '📈 Laporan' }
+                ];
+
+                const load = async () => {
+                    transactions.value = await db.getAll('transactions');
+                    debts.value = await db.getAll('debts');
+                    customers.value = await db.getAll('customers');
+                    categories.value = await db.getAll('categories');
+                };
+
+                const addT = async (data) => { await db.add('transactions', data); alert('Tersimpan!'); await load(); };
+                const delT = async (id) => { await db.delete('transactions', id); await load(); };
+                const addC = async (data) => { await db.add('customers', { ...data, totalDebt: 0 }); alert('Tersimpan!'); await load(); };
+                const addD = async (data) => { await db.add('debts', { ...data, status: 'pending', createdAt: new Date().toISOString().split('T')[0] }); alert('Tersimpan!'); await load(); };
+                const upD = async (id, status) => { const d = await db.get('debts', id); await db.put('debts', { ...d, status }); await load(); };
+                const delD = async (id) => { await db.delete('debts', id); await load(); };
+
+                onMounted(async () => {
+                    await initDB();
+                    await load();
+                });
+
+                return { page, transactions, debts, customers, categories, navs, addT, delT, addC, addD, upD, delD };
+            }
+        };
+
+        createApp(App).mount('#app');
+    </script>
+</body>
+</html>

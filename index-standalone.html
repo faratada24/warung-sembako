@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Aplikasi pengelolaan keuangan sembako dan hutang">
+    <meta name="theme-color" content="#06B6D4">
+    <title>Manajemen Keuangan Sembako</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; }
+        .fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }
+        .fade-enter-from, .fade-leave-to { opacity: 0; }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="app"></div>
+
+    <script>
+        const { createApp, ref, computed, onMounted } = Vue;
+
+        // localStorage-backed DB shim for standalone
+        const storage = {
+            getData(key, defaultVal = []) { try { return JSON.parse(localStorage.getItem(key)) || defaultVal } catch { return defaultVal } },
+            setData(key, data) { localStorage.setItem(key, JSON.stringify(data)) }
+        };
+
+        const db = {
+            async getAll(store) { return storage.getData(store) },
+            async add(store, item) {
+                const arr = storage.getData(store);
+                const id = item.id || Date.now();
+                const toAdd = { ...item, id };
+                arr.push(toAdd);
+                storage.setData(store, arr);
+                return id;
+            },
+            async delete(store, id) { storage.setData(store, storage.getData(store).filter(x => x.id !== id)) },
+            async get(store, id) { return storage.getData(store).find(x => x.id === id) },
+            async put(store, item) { const arr = storage.getData(store); const i = arr.findIndex(x => x.id === item.id); if (i >= 0) arr[i] = item; else arr.push(item); storage.setData(store, arr) },
+            async count(store) { return storage.getData(store).length }
+        };
+
+        async function initDB() {
+            if (storage.getData('categories').length === 0) {
+                storage.setData('categories', [
+                    { id: 1, name: 'Beras', type: 'expense' },
+                    { id: 2, name: 'Minyak', type: 'expense' },
+                    { id: 3, name: 'Gula', type: 'expense' },
+                    { id: 4, name: 'Telur', type: 'expense' },
+                    { id: 5, name: 'Bumbu', type: 'expense' },
+                    { id: 6, name: 'Penjualan', type: 'income' },
+                    { id: 7, name: 'Hutang Terbayar', type: 'income' },
+                    { id: 8, name: 'Lainnya', type: 'expense' }
+                ]);
+            }
+        }
+
+        // Define all components first before App
+
+        // Dashboard Component
+        const App = {
+            template: `
+                <div class="min-h-screen bg-gray-50">
+                    <!-- Header -->
+                    <header class="bg-gradient-to-r from-cyan-500 to-green-500 text-white shadow-lg sticky top-0 z-40">
+                        <div class="max-w-6xl mx-auto px-4 py-4">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-2xl">💰</span>
+                                    <h1 class="text-xl font-bold">Manajemen Keuangan</h1>
+                                </div>
+                                <nav class="flex gap-2 flex-wrap justify-end">
+                                    <button 
+                                        v-for="nav in navs" 
+                                        :key="nav.id"
+                                        @click="currentPage = nav.id"
+                                        :class="['px-3 py-2 rounded text-sm font-semibold transition', currentPage === nav.id ? 'bg-white text-cyan-600' : 'hover:bg-white hover:bg-opacity-20']"
+                                    >
+                                        {{ nav.label }}
+                                    </button>
+                                </nav>
+                            </div>
+                        </div>
+                    </header>
+
+                    <!-- Main Content -->
+                    <main class="max-w-6xl mx-auto px-4 py-6">
+                        <dashboard v-if="currentPage === 'dashboard'" :transactions="transactions" :debts="debts" @refresh="loadData"></dashboard>
+                        <transaction-form v-else-if="currentPage === 'transaction'" :categories="categories" @add="addTransaction" :transactions="transactions" @delete="deleteTransaction"></transaction-form>
+                        <debt-management v-else-if="currentPage === 'debt'" :customers="customers" :debts="debts" :categories="categories" @add-customer="addCustomer" @add-debt="addDebt" @update-debt="updateDebt" @delete-debt="deleteDebt"></debt-management>
+                        <reports v-else-if="currentPage === 'reports'" :transactions="transactions" :debts="debts" :categories="categories"></reports>
+                    </main>
+
+                    <!-- Footer -->
+                    <footer class="bg-gray-100 text-gray-600 text-center py-4 mt-12 text-sm">
+                        <p>© 2024 Manajemen Keuangan Sembako v1.0 • Data tersimpan lokal di device Anda</p>
+                    </footer>
+                </div>
+            `,
+            components: {
+                'dashboard': Dashboard,
+                'transaction-form': TransactionForm,
+                'debt-management': DebtManagement,
+                'reports': Reports
+            },
+            setup() {
+                const currentPage = ref('dashboard');
+                const transactions = ref([]);
+                const debts = ref([]);
+                const customers = ref([]);
+                const categories = ref([]);
+
+                const navs = [
+                    { id: 'dashboard', label: '📊 Dashboard' },
+                    { id: 'transaction', label: '💳 Transaksi' },
+                    { id: 'debt', label: '📝 Hutang' },
+                    { id: 'reports', label: '📈 Laporan' }
+                ];
+
+                const loadData = async () => {
+                    transactions.value = await db.getAll('transactions');
+                    debts.value = await db.getAll('debts');
+                    customers.value = await db.getAll('customers');
+                    categories.value = await db.getAll('categories');
+                };
+
+                const addTransaction = async (data) => {
+                    await db.add('transactions', data);
+                    await loadData();
+                };
+
+                const deleteTransaction = async (id) => {
+                    await db.delete('transactions', id);
+                    await loadData();
+                };
+
+                const addCustomer = async (data) => {
+                    await db.add('customers', { ...data, totalDebt: 0 });
+                    await loadData();
+                };
+
+                const addDebt = async (data) => {
+                    await db.add('debts', { ...data, status: 'pending', createdAt: new Date().toISOString().split('T')[0] });
+                    await loadData();
+                };
+
+                const updateDebt = async (id, status) => {
+                    const debt = await db.get('debts', id);
+                    await db.put('debts', { ...debt, status });
+                    await loadData();
+                };
+
+                const deleteDebt = async (id) => {
+                    await db.delete('debts', id);
+                    await loadData();
+                };
+
+                onMounted(async () => {
+                    await initDB();
+                    await loadData();
+                });
+
+                return {
+                    currentPage,
+                    transactions,
+                    debts,
+                    customers,
+                    categories,
+                    navs,
+                    loadData,
+                    addTransaction,
+                    deleteTransaction,
+                    addCustomer,
+                    addDebt,
+                    updateDebt,
+                    deleteDebt
+                };
+            }
+        };
+
+        // Dashboard Component
+        const Dashboard = {
+            template: `
+                <div class="space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-gradient-to-br from-cyan-500 to-blue-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm font-semibold opacity-90">Saldo Akhir</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(balance) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-green-500 to-emerald-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm font-semibold opacity-90">Total Pemasukan</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(income) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-orange-500 to-red-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm font-semibold opacity-90">Total Pengeluaran</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(expense) }}</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📊 Ringkasan Hutang</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div class="bg-blue-50 p-4 rounded-lg">
+                                <p class="text-gray-600 text-sm">Total Hutang Aktif</p>
+                                <p class="text-2xl font-bold text-blue-600 mt-1">Rp {{ formatCurrency(totalDebt) }}</p>
+                            </div>
+                            <div class="bg-green-50 p-4 rounded-lg">
+                                <p class="text-gray-600 text-sm">Hutang Terbayar</p>
+                                <p class="text-2xl font-bold text-green-600 mt-1">Rp {{ formatCurrency(paidDebt) }}</p>
+                            </div>
+                            <div class="bg-red-50 p-4 rounded-lg">
+                                <p class="text-gray-600 text-sm">Hutang Jatuh Tempo</p>
+                                <p class="text-2xl font-bold text-red-600 mt-1">{{ overdueCount }}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📋 Transaksi Terbaru</h2>
+                        <div v-if="recentTransactions.length === 0" class="text-center py-8 text-gray-400">
+                            Belum ada transaksi
+                        </div>
+                        <div v-else class="space-y-2">
+                            <div v-for="t in recentTransactions" :key="t.id" class="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100">
+                                <div>
+                                    <p class="font-semibold text-gray-900">{{ t.description }}</p>
+                                    <p class="text-xs text-gray-500">{{ formatDate(t.date) }}</p>
+                                </div>
+                                <span :class="['font-bold', t.type === 'income' ? 'text-green-600' : 'text-red-600']">
+                                    {{ t.type === 'income' ? '+' : '-' }} Rp {{ formatCurrency(t.amount) }}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['transactions', 'debts'],
+            emits: ['refresh'],
+            setup(props) {
+                const income = computed(() =>
+                    props.transactions.filter(t => t.type === 'income').reduce((sum, t) => sum + (t.amount || 0), 0)
+                );
+                const expense = computed(() =>
+                    props.transactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + (t.amount || 0), 0)
+                );
+                const balance = computed(() => income.value - expense.value);
+                const totalDebt = computed(() =>
+                    props.debts.filter(d => d.status !== 'paid').reduce((sum, d) => sum + (d.amount || 0), 0)
+                );
+                const paidDebt = computed(() =>
+                    props.debts.filter(d => d.status === 'paid').reduce((sum, d) => sum + (d.amount || 0), 0)
+                );
+                const overdueCount = computed(() =>
+                    props.debts.filter(d => d.status !== 'paid' && d.dueDate < new Date().toISOString().split('T')[0]).length
+                );
+                const recentTransactions = computed(() =>
+                    [...props.transactions].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5)
+                );
+
+                return {
+                    income, expense, balance, totalDebt, paidDebt, overdueCount, recentTransactions,
+                    formatCurrency: (n) => new Intl.NumberFormat('id-ID').format(n || 0),
+                    formatDate: (d) => new Date(d).toLocaleDateString('id-ID', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })
+                };
+            }
+        };
+
+        // Transaction Form Component
+        const TransactionForm = {
+            template: `
+                <div class="space-y-6">
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">💳 Tambah Transaksi Baru</h2>
+                        <form @submit.prevent="submit" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Jenis Transaksi</label>
+                                <div class="flex gap-4">
+                                    <label class="flex items-center">
+                                        <input v-model="form.type" type="radio" value="income" class="mr-2">
+                                        <span>➕ Pemasukan</span>
+                                    </label>
+                                    <label class="flex items-center">
+                                        <input v-model="form.type" type="radio" value="expense" class="mr-2">
+                                        <span>➖ Pengeluaran</span>
+                                    </label>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Kategori</label>
+                                <select v-model.number="form.categoryId" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none">
+                                    <option value="">Pilih Kategori</option>
+                                    <option v-for="c in filteredCategories" :key="c.id" :value="c.id">{{ c.name }}</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Jumlah (Rp)</label>
+                                <input v-model.number="form.amount" type="number" placeholder="Masukkan jumlah" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" required>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Keterangan</label>
+                                <textarea v-model="form.description" placeholder="Masukkan keterangan" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" rows="2"></textarea>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Tanggal</label>
+                                <input v-model="form.date" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" required>
+                            </div>
+                            <button type="submit" class="w-full bg-cyan-500 text-white px-4 py-2 rounded-lg hover:bg-cyan-600 font-semibold">Simpan Transaksi</button>
+                        </form>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📝 Daftar Transaksi</h2>
+                        <div v-if="sortedTransactions.length === 0" class="text-center py-8 text-gray-400">Belum ada transaksi</div>
+                        <div v-else class="space-y-2">
+                            <div v-for="t in sortedTransactions" :key="t.id" class="flex items-center justify-between p-4 bg-gray-50 rounded-lg border-l-4" :class="t.type === 'income' ? 'border-green-500' : 'border-red-500'">
+                                <div>
+                                    <p class="font-semibold">{{ t.description }}</p>
+                                    <p class="text-xs text-gray-500">{{ formatDate(t.date) }}</p>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <span :class="['font-bold text-lg', t.type === 'income' ? 'text-green-600' : 'text-red-600']">{{ t.type === 'income' ? '+' : '-' }} Rp {{ formatCurrency(t.amount) }}</span>
+                                    <button @click="$emit('delete', t.id)" class="text-red-600 hover:text-red-700 text-xl">❌</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['categories', 'transactions'],
+            emits: ['add', 'delete'],
+            setup(props, { emit }) {
+                const form = ref({
+                    type: 'expense',
+                    categoryId: '',
+                    amount: '',
+                    description: '',
+                    date: new Date().toISOString().split('T')[0],
+                    paymentMethod: 'cash'
+                });
+
+                const filteredCategories = computed(() =>
+                    props.categories.filter(c => c.type === form.value.type)
+                );
+
+                const sortedTransactions = computed(() =>
+                    [...props.transactions].sort((a, b) => new Date(b.date) - new Date(a.date))
+                );
+
+                const submit = () => {
+                    if (!form.value.categoryId || !form.value.amount) {
+                        alert('Lengkapi semua data!');
+                        return;
+                    }
+                    emit('add', form.value);
+                    form.value = { type: 'expense', categoryId: '', amount: '', description: '', date: new Date().toISOString().split('T')[0], paymentMethod: 'cash' };
+                    alert('Transaksi berhasil disimpan!');
+                };
+
+                return {
+                    form, filteredCategories, sortedTransactions, submit,
+                    formatCurrency: (n) => new Intl.NumberFormat('id-ID').format(n || 0),
+                    formatDate: (d) => new Date(d).toLocaleDateString('id-ID', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })
+                };
+            }
+        };
+
+        // Debt Management Component
+        const DebtManagement = {
+            template: `
+                <div class="space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="bg-white rounded-lg shadow p-6">
+                            <h2 class="text-lg font-bold mb-4">👥 Tambah Pelanggan Baru</h2>
+                            <form @submit.prevent="submitCustomer" class="space-y-4">
+                                <input v-model="customerForm.name" type="text" placeholder="Nama Pelanggan" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" required>
+                                <input v-model="customerForm.phone" type="tel" placeholder="Nomor HP (opsional)" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none">
+                                <textarea v-model="customerForm.address" placeholder="Alamat (opsional)" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" rows="2"></textarea>
+                                <button type="submit" class="w-full bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 font-semibold">Tambah Pelanggan</button>
+                            </form>
+                        </div>
+
+                        <div class="bg-white rounded-lg shadow p-6">
+                            <h2 class="text-lg font-bold mb-4">📝 Catat Hutang Baru</h2>
+                            <form @submit.prevent="submitDebt" class="space-y-4">
+                                <select v-model.number="debtForm.customerId" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" required>
+                                    <option value="">Pilih Pelanggan</option>
+                                    <option v-for="c in customers" :key="c.id" :value="c.id">{{ c.name }}</option>
+                                </select>
+                                <input v-model.number="debtForm.amount" type="number" placeholder="Jumlah Hutang (Rp)" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" required>
+                                <input v-model="debtForm.dueDate" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" required>
+                                <textarea v-model="debtForm.notes" placeholder="Catatan" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" rows="2"></textarea>
+                                <button type="submit" class="w-full bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 font-semibold">Catat Hutang</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">👫 Daftar Pelanggan</h2>
+                        <div v-if="customers.length === 0" class="text-center py-8 text-gray-400">Belum ada pelanggan</div>
+                        <div v-else class="space-y-3">
+                            <div v-for="c in customers" :key="c.id" class="p-4 bg-gray-50 rounded-lg border-l-4 border-cyan-500">
+                                <div class="flex items-start justify-between">
+                                    <div>
+                                        <p class="font-bold text-lg">{{ c.name }}</p>
+                                        <p class="text-sm text-gray-600">{{ c.phone }}</p>
+                                        <p class="text-xs text-gray-500">{{ c.address }}</p>
+                                    </div>
+                                    <div class="text-right">
+                                        <p class="text-sm text-gray-600">Total Hutang</p>
+                                        <p class="font-bold text-lg text-red-600">Rp {{ formatCurrency(c.totalDebt || 0) }}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">💳 Daftar Hutang</h2>
+                        <div class="space-y-2 mb-4 flex gap-2 flex-wrap">
+                            <button v-for="tab in debtTabs" :key="tab.status" @click="selectedDebtStatus = tab.status" :class="['px-4 py-2 rounded font-semibold', selectedDebtStatus === tab.status ? 'bg-cyan-500 text-white' : 'bg-gray-200']">
+                                {{ tab.label }} ({{ getDebtCount(tab.status) }})
+                            </button>
+                        </div>
+                        <div v-if="filteredDebts.length === 0" class="text-center py-8 text-gray-400">Belum ada hutang</div>
+                        <div v-else class="space-y-3">
+                            <div v-for="debt in filteredDebts" :key="debt.id" class="p-4 bg-gray-50 rounded-lg" :class="debt.status === 'overdue' ? 'border-2 border-red-500' : ''">
+                                <div class="flex items-start justify-between mb-2">
+                                    <div>
+                                        <p class="font-bold">{{ getCustomerName(debt.customerId) }}</p>
+                                        <p class="text-sm text-gray-600">Jatuh tempo: {{ formatDate(debt.dueDate) }}</p>
+                                    </div>
+                                    <div class="text-right">
+                                        <p class="font-bold text-lg">Rp {{ formatCurrency(debt.amount) }}</p>
+                                        <span :class="['text-xs font-semibold px-2 py-1 rounded', debt.status === 'paid' ? 'bg-green-100 text-green-800' : debt.status === 'overdue' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800']">
+                                            {{ debt.status }}
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2">
+                                    <button v-if="debt.status !== 'paid'" @click="$emit('update-debt', debt.id, 'paid')" class="flex-1 bg-green-500 text-white text-sm px-3 py-2 rounded hover:bg-green-600">✓ Tandai Lunas</button>
+                                    <button @click="$emit('delete-debt', debt.id)" class="flex-1 bg-red-500 text-white text-sm px-3 py-2 rounded hover:bg-red-600">❌ Hapus</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['customers', 'debts', 'categories'],
+            emits: ['add-customer', 'add-debt', 'update-debt', 'delete-debt'],
+            setup(props, { emit }) {
+                const customerForm = ref({ name: '', phone: '', address: '' });
+                const debtForm = ref({ customerId: '', amount: '', dueDate: '', notes: '' });
+                const selectedDebtStatus = ref('pending');
+
+                const debtTabs = [
+                    { status: 'pending', label: '⏳ Hutang Aktif' },
+                    { status: 'overdue', label: '⚠️ Jatuh Tempo' },
+                    { status: 'paid', label: '✓ Lunas' }
+                ];
+
+                const filteredDebts = computed(() =>
+                    props.debts.filter(d => {
+                        if (selectedDebtStatus.value === 'overdue') {
+                            return d.status !== 'paid' && d.dueDate < new Date().toISOString().split('T')[0];
+                        }
+                        return d.status === selectedDebtStatus.value;
+                    })
+                );
+
+                const submitCustomer = () => {
+                    if (!customerForm.value.name) {
+                        alert('Nama pelanggan harus diisi!');
+                        return;
+                    }
+                    emit('add-customer', customerForm.value);
+                    customerForm.value = { name: '', phone: '', address: '' };
+                    alert('Pelanggan berhasil ditambahkan!');
+                };
+
+                const submitDebt = () => {
+                    if (!debtForm.value.customerId || !debtForm.value.amount || !debtForm.value.dueDate) {
+                        alert('Lengkapi semua data!');
+                        return;
+                    }
+                    emit('add-debt', debtForm.value);
+                    debtForm.value = { customerId: '', amount: '', dueDate: '', notes: '' };
+                    alert('Hutang berhasil dicatat!');
+                };
+
+                const getDebtCount = (status) => {
+                    if (status === 'overdue') {
+                        return props.debts.filter(d => d.status !== 'paid' && d.dueDate < new Date().toISOString().split('T')[0]).length;
+                    }
+                    return props.debts.filter(d => d.status === status).length;
+                };
+
+                const getCustomerName = (id) => {
+                    return props.customers.find(c => c.id === id)?.name || 'Unknown';
+                };
+
+                return {
+                    customerForm, debtForm, selectedDebtStatus, debtTabs, filteredDebts,
+                    submitCustomer, submitDebt, getDebtCount, getCustomerName,
+                    formatCurrency: (n) => new Intl.NumberFormat('id-ID').format(n || 0),
+                    formatDate: (d) => new Date(d).toLocaleDateString('id-ID', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })
+                };
+            }
+        };
+
+        // Reports Component
+        const Reports = {
+            template: `
+                <div class="space-y-6">
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📅 Filter Laporan</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Dari Tanggal</label>
+                                <input v-model="filterFrom" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" @change="generateReport">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Sampai Tanggal</label>
+                                <input v-model="filterTo" type="date" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" @change="generateReport">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold mb-2">Tipe</label>
+                                <select v-model="filterType" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-cyan-500 focus:outline-none" @change="generateReport">
+                                    <option value="">Semua Transaksi</option>
+                                    <option value="income">Pemasukan</option>
+                                    <option value="expense">Pengeluaran</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-gradient-to-br from-green-500 to-emerald-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm font-semibold opacity-90">Total Pemasukan</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(reportSummary.income) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-orange-500 to-red-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm font-semibold opacity-90">Total Pengeluaran</p>
+                            <p class="text-3xl font-bold mt-2">Rp {{ formatCurrency(reportSummary.expense) }}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-cyan-500 to-blue-500 text-white rounded-lg shadow p-6">
+                            <p class="text-sm font-semibold opacity-90">Laba/Rugi</p>
+                            <p :class="['text-3xl font-bold mt-2', reportSummary.profit >= 0 ? 'text-green-300' : 'text-red-300']">Rp {{ formatCurrency(reportSummary.profit) }}</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">📊 Rincian per Kategori</h2>
+                        <div v-if="categoryBreakdown.length === 0" class="text-center py-8 text-gray-400">Tidak ada data</div>
+                        <div v-else class="space-y-2">
+                            <div v-for="item in categoryBreakdown" :key="item.categoryId" class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                                <div>
+                                    <p class="font-semibold">{{ item.categoryName }}</p>
+                                    <p class="text-xs text-gray-500">{{ item.count }} transaksi</p>
+                                </div>
+                                <div class="text-right">
+                                    <p class="font-bold">Rp {{ formatCurrency(item.total) }}</p>
+                                    <p class="text-xs text-gray-500">{{ ((item.total / reportSummary.total) * 100).toFixed(1) }}%</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <h2 class="text-lg font-bold mb-4">💾 Ekspor Data</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <button @click="exportToCSV" class="bg-cyan-500 text-white px-4 py-2 rounded-lg hover:bg-cyan-600 font-semibold">📥 Unduh CSV</button>
+                            <button @click="exportToJSON" class="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 font-semibold">📥 Unduh JSON</button>
+                            <button @click="printReport" class="bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600 font-semibold">🖨️ Cetak Laporan</button>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: ['transactions', 'debts', 'categories'],
+            setup(props) {
+                const filterFrom = ref('');
+                const filterTo = ref('');
+                const filterType = ref('');
+
+                onMounted(() => {
+                    const today = new Date();
+                    const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+                    filterFrom.value = firstDay.toISOString().split('T')[0];
+                    filterTo.value = today.toISOString().split('T')[0];
+                });
+
+                const reportTransactions = computed(() =>
+                    props.transactions.filter(t => {
+                        if (t.date < filterFrom.value || t.date > filterTo.value) return false;
+                        if (filterType.value && t.type !== filterType.value) return false;
+                        return true;
+                    })
+                );
+
+                const reportSummary = computed(() => {
+                    const income = reportTransactions.value.filter(t => t.type === 'income').reduce((sum, t) => sum + (t.amount || 0), 0);
+                    const expense = reportTransactions.value.filter(t => t.type === 'expense').reduce((sum, t) => sum + (t.amount || 0), 0);
+                    return { income, expense, profit: income - expense, total: income + expense };
+                });
+
+                const categoryBreakdown = computed(() => {
+                    const categories = {};
+                    reportTransactions.value.forEach(t => {
+                        if (!categories[t.categoryId]) {
+                            categories[t.categoryId] = { total: 0, count: 0, categoryId: t.categoryId };
+                        }
+                        categories[t.categoryId].total += t.amount || 0;
+                        categories[t.categoryId].count += 1;
+                    });
+                    return Object.values(categories).map(cat => ({
+                        ...cat,
+                        categoryName: getCategoryName(cat.categoryId)
+                    }));
+                });
+
+                const getCategoryName = (id) => props.categories.find(c => c.id === id)?.name || 'Unknown';
+
+                const exportToCSV = () => {
+                    let csv = 'Tanggal,Tipe,Kategori,Jumlah,Keterangan\n';
+                    reportTransactions.value.forEach(t => {
+                        csv += `${t.date},${t.type},${getCategoryName(t.categoryId)},${t.amount},"${t.description}"\n`;
+                    });
+                    downloadFile(csv, 'laporan.csv', 'text/csv');
+                };
+
+                const exportToJSON = () => {
+                    const data = { periode: `${filterFrom.value} - ${filterTo.value}`, summary: reportSummary.value, transactions: reportTransactions.value };
+                    downloadFile(JSON.stringify(data, null, 2), 'laporan.json', 'application/json');
+                };
+
+                const downloadFile = (content, filename, type) => {
+                    const element = document.createElement('a');
+                    element.setAttribute('href', `data:${type};charset=utf-8,${encodeURIComponent(content)}`);
+                    element.setAttribute('download', filename);
+                    element.style.display = 'none';
+                    document.body.appendChild(element);
+                    element.click();
+                    document.body.removeChild(element);
+                };
+
+                const printReport = () => window.print();
+
+                const generateReport = () => {};
+
+                return {
+                    filterFrom, filterTo, filterType, reportSummary, categoryBreakdown,
+                    exportToCSV, exportToJSON, printReport, generateReport,
+                    formatCurrency: (n) => new Intl.NumberFormat('id-ID').format(n || 0)
+                };
+            }
+        };
+
+        // Create app
+        createApp(App).mount('#app');
+    </script>
+</body>
+</html>
